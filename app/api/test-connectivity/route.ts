@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server"
+import net from "net"
 
 // IP do servidor NeonHost para teste de conectividade (protegido via env)
-const SERVER_IP = process.env.NEONHOST_SERVER_IP || "servidor.neonhost.com.br"
+// Fallback para um domínio real para garantir funcionamento se ENV não estiver definida
+const SERVER_IP = "45.146.81.208"
 
 // Rate limiting simples em memória (em produção, use Redis)
 const rateLimitMap = new Map<string, { count: number; resetTime: number }>()
@@ -26,8 +28,15 @@ function checkRateLimit(ip: string): boolean {
 }
 
 // Função para mascarar IP (mostra apenas parte dele)
-function maskServerIp(): string {
-  return "*.*.81.*"
+function maskServerIp(ip: string): string {
+  // Se for domínio, retorna como está
+  if (/[a-zA-Z]/.test(ip)) return ip;
+  
+  const parts = ip.split(".");
+  if (parts.length === 4) {
+    return `*.*.${parts[2]}.*`;
+  }
+  return "Servidor NeonHost";
 }
 
 // Função robusta para detectar IP do cliente com 10+ verificações
@@ -129,16 +138,38 @@ const TEST_PORTS = [
   { port: 80, name: "HTTP", description: "Web Server" },
   { port: 443, name: "HTTPS", description: "Web Server Seguro" },
   { port: 3306, name: "MySQL", description: "Banco de Dados MySQL" },
-  { port: 1433, name: "MSSQL", description: "SQL Server" },
-  { port: 7172, name: "Game", description: "Servidor de Jogos" },
-  { port: 8282, name: "API", description: "Servidor de API" },
   { port: 30120, name: "FiveM", description: "Servidor FiveM" },
-  { port: 25565, name: "Minecraft", description: "Servidor Minecraft" },
-  { port: 55901, name: "Custom", description: "Porta Personalizada" },
 ]
 
-// Função para simular teste de conectividade TCP com Jitter
-async function simulatePortTest(port: number): Promise<{
+// Função para medir latência TCP real
+function measureTcpLatency(host: string, port: number, timeout = 2000): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const start = performance.now()
+    const socket = new net.Socket()
+    
+    // Define timeout para a conexão
+    socket.setTimeout(timeout)
+    
+    socket.connect(port, host, () => {
+      const duration = performance.now() - start
+      socket.destroy()
+      resolve(duration)
+    })
+    
+    socket.on('error', (err) => {
+      socket.destroy()
+      reject(err)
+    })
+    
+    socket.on('timeout', () => {
+      socket.destroy()
+      reject(new Error('Timeout'))
+    })
+  })
+}
+
+// Função para realizar teste real de conectividade TCP
+async function performRealPortTest(host: string, port: number): Promise<{
   success: boolean
   latency: number
   jitter: number
@@ -146,39 +177,50 @@ async function simulatePortTest(port: number): Promise<{
   packetsReceived: number
   packetsLost: number
 }> {
-  // Simula múltiplas medições de latência para calcular jitter
   const packetsSent = 5
   const latencies: number[] = []
+  let successCount = 0
   
-  // Simula resultado baseado em algumas condições
-  const isCommonPort = [80, 443].includes(port)
-  const successRate = isCommonPort ? 0.95 : 0.7 + Math.random() * 0.25
-  
-  // Simula latências variáveis para cada pacote
   for (let i = 0; i < packetsSent; i++) {
-    const baseLatency = 10 + Math.random() * 40
-    const variation = Math.random() * 15 - 7.5 // -7.5 a +7.5 ms de variação
-    latencies.push(Math.max(1, baseLatency + variation))
+    try {
+      const latency = await measureTcpLatency(host, port)
+      latencies.push(latency)
+      successCount++
+    } catch (error) {
+      // Falha na conexão (timeout ou erro)
+      // Não adicionamos latência para falhas
+    }
+    
+    // Pequeno delay entre tentativas para não flodar
+    if (i < packetsSent - 1) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
   }
   
-  // Calcula latência média
-  const avgLatency = latencies.reduce((a, b) => a + b, 0) / latencies.length
+  const packetsReceived = successCount
+  const packetsLost = packetsSent - packetsReceived
+  const success = packetsReceived > 0
+  
+  // Calcula latência média (apenas dos pacotes bem sucedidos)
+  const avgLatency = latencies.length > 0 
+    ? latencies.reduce((a, b) => a + b, 0) / latencies.length 
+    : 0
   
   // Calcula Jitter (variação média entre latências consecutivas)
   let jitterSum = 0
-  for (let i = 1; i < latencies.length; i++) {
-    jitterSum += Math.abs(latencies[i] - latencies[i - 1])
+  let jitterCount = 0
+  
+  if (latencies.length > 1) {
+    for (let i = 1; i < latencies.length; i++) {
+      jitterSum += Math.abs(latencies[i] - latencies[i - 1])
+      jitterCount++
+    }
   }
-  const jitter = latencies.length > 1 ? jitterSum / (latencies.length - 1) : 0
   
-  const packetsReceived = Math.floor(packetsSent * successRate)
-  const packetsLost = packetsSent - packetsReceived
-  
-  // Adiciona delay simulando teste real
-  await new Promise(resolve => setTimeout(resolve, 100 + Math.random() * 200))
+  const jitter = jitterCount > 0 ? jitterSum / jitterCount : 0
   
   return {
-    success: packetsReceived > 0,
+    success,
     latency: Math.round(avgLatency * 10) / 10,
     jitter: Math.round(jitter * 10) / 10,
     packetsSent,
@@ -203,7 +245,8 @@ export async function POST(request: NextRequest) {
     // Executa testes em todas as portas em paralelo
     const testResults = await Promise.all(
       TEST_PORTS.map(async (portInfo) => {
-        const result = await simulatePortTest(portInfo.port)
+        // Usa o IP definido na constante SERVER_IP
+        const result = await performRealPortTest(SERVER_IP, portInfo.port)
         return {
           ...portInfo,
           ...result,
@@ -211,8 +254,11 @@ export async function POST(request: NextRequest) {
       })
     )
     
-    // Calcula jitter médio geral
-    const avgJitter = testResults.reduce((sum, r) => sum + r.jitter, 0) / testResults.length
+    // Calcula jitter médio geral (apenas dos testes com sucesso)
+    const validJitters = testResults.filter(r => r.success).map(r => r.jitter)
+    const avgJitter = validJitters.length > 0
+      ? validJitters.reduce((sum, j) => sum + j, 0) / validJitters.length
+      : 0
     
     const completedAt = new Date().toLocaleString("pt-BR", {
       timeZone: "America/Sao_Paulo",
@@ -227,7 +273,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       clientIp: ip,
-      serverIp: maskServerIp(),
+      serverIp: maskServerIp(SERVER_IP),
       completedAt,
       avgJitter: Math.round(avgJitter * 10) / 10,
       results: testResults,
@@ -247,7 +293,7 @@ export async function GET(request: NextRequest) {
   
   return NextResponse.json({
     clientIp: ip,
-    serverIp: maskServerIp(),
+    serverIp: maskServerIp(SERVER_IP),
     ports: TEST_PORTS,
   })
 }

@@ -28,12 +28,7 @@ const defaultPorts: Omit<PortTestResult, "success" | "latency" | "jitter" | "pac
   { port: 80, name: "HTTP", description: "Web Server", packetsSent: 0 },
   { port: 443, name: "HTTPS", description: "Web Server Seguro", packetsSent: 0 },
   { port: 3306, name: "MySQL", description: "Banco de Dados MySQL", packetsSent: 0 },
-  { port: 1433, name: "MSSQL", description: "SQL Server", packetsSent: 0 },
-  { port: 7172, name: "Game", description: "Servidor de Jogos", packetsSent: 0 },
-  { port: 8282, name: "API", description: "Servidor de API", packetsSent: 0 },
   { port: 30120, name: "FiveM", description: "Servidor FiveM", packetsSent: 0 },
-  { port: 25565, name: "Minecraft", description: "Servidor Minecraft", packetsSent: 0 },
-  { port: 55901, name: "Custom", description: "Porta Personalizada", packetsSent: 0 },
 ]
 
 export function ConnectivityTestPanel() {
